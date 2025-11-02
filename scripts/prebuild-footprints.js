@@ -15,7 +15,11 @@ async function fetchWithTimeout(url, type) {
         const timeout = setTimeout(() => controller.abort(), 30_000);
         try {
                 const res = await fetch(url, { signal: controller.signal });
-                if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+                if (!res.ok) {
+                        const error = new Error(`Failed to fetch ${url}: ${res.status}`);
+                        error.status = res.status;
+                        throw error;
+                }
                 return type === "json" ? res.json() : res.text();
         } catch (error) {
                 if (error.name === "AbortError") {
@@ -48,18 +52,30 @@ async function main() {
                 }
                 throw error;
         }
+        const missingFiles = [];
+        const failedDownloads = [];
+        let networkDownloadWarningShown = false;
         for (const file of files) {
                 if (!file.endsWith(".kicad_mod")) continue;
                 const content = await fetchText(`${BASE_URL}/${file}`).catch((error) => {
                         if (isNetworkUnreachable(error)) {
-                                console.warn(
-                                        `[prebuild-footprints] Network unreachable while downloading ${file}. Skipping.`
-                                );
+                                if (!networkDownloadWarningShown) {
+                                        console.warn(
+                                                "[prebuild-footprints] Network unreachable while downloading KiCad footprints. " +
+                                                        "Skipping remaining downloads."
+                                        );
+                                        networkDownloadWarningShown = true;
+                                }
+                                return null;
+                        }
+                        if (error.status === 404) {
+                                missingFiles.push(file);
                                 return null;
                         }
                         console.warn(
                                 `[prebuild-footprints] Failed to download ${file}: ${error.message ?? error}`
                         );
+                        failedDownloads.push(file);
                         return null;
                 });
                 if (!content) continue;
@@ -69,9 +85,28 @@ async function main() {
 			"circuit-json",
 			file.replace(/\.kicad_mod$/, ".json"),
 		);
-		await mkdir(dirname(outPath), { recursive: true });
-		await writeFile(outPath, JSON.stringify(soup, null, 2), "utf8");
-	}
+                await mkdir(dirname(outPath), { recursive: true });
+                await writeFile(outPath, JSON.stringify(soup, null, 2), "utf8");
+        }
+        if (missingFiles.length > 0) {
+                console.warn(
+                        `[prebuild-footprints] Skipped ${missingFiles.length} missing footprint${
+                                missingFiles.length === 1 ? "" : "s"
+                        } (404).`
+                );
+                if (missingFiles.length <= 10) {
+                        for (const file of missingFiles) {
+                                console.warn(`  • ${file}`);
+                        }
+                }
+        }
+        if (failedDownloads.length > 0) {
+                console.warn(
+                        `[prebuild-footprints] Encountered ${failedDownloads.length} other download failure${
+                                failedDownloads.length === 1 ? "" : "s"
+                        }. See logs above for details.`
+                );
+        }
 }
 
 main().catch((err) => {

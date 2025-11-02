@@ -1,5 +1,4 @@
-import { useQuery } from "react-query"
-import { useState, useEffect } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   FaGithub,
   FaTwitter,
@@ -17,60 +16,131 @@ function App() {
   const serverUrl = window.location.hostname.includes("localhost")
     ? "/api"
     : "https://kicad-mod-cache.tscircuit.com"
-  const {
-    data: kicadFiles,
-    error,
-    isLoading: sidebarLoading,
-  } = useQuery(
-    "kicadFiles",
-    async () => {
-      const response = await fetch(`${serverUrl}/kicad_files.json`)
-      if (!response.ok) {
-        throw new Error("Network response was not ok")
-      }
-      return response
-        .json()
-        .then((r) => r.filter((f: string) => f.endsWith(".kicad_mod")))
-    },
-    {
-      cacheTime: 60_000 * 60,
-      staleTime: 60_000 * 60,
-      refetchOnWindowFocus: false,
-    },
+  const [kicadFiles, setKicadFiles] = useState<string[] | null>(null)
+  const [error, setError] = useState<Error | null>(null)
+
+  const [fileContent, setFileContent] = useState<string | null>(null)
+  const [fileError, setFileError] = useState<Error | null>(null)
+  const fileContentCache = useRef(new Map<string, string>())
+
+  const [soup, setSoup] = useState<
+    ReturnType<typeof parseKicadModToTscircuitSoup> | null
+  >(null)
+  const [soupError, setSoupError] = useState<Error | null>(null)
+  const soupCache = useRef(
+    new Map<string, ReturnType<typeof parseKicadModToTscircuitSoup>>(),
   )
+
+  useEffect(() => {
+    let cancelled = false
+    const controller = new AbortController()
+    setError(null)
+
+    const loadFiles = async () => {
+      try {
+        const response = await fetch(`${serverUrl}/kicad_files.json`, {
+          signal: controller.signal,
+        })
+        if (!response.ok) {
+          throw new Error("Network response was not ok")
+        }
+        const files = (await response.json()) as string[]
+        if (!cancelled) {
+          setKicadFiles(files.filter((f) => f.endsWith(".kicad_mod")))
+        }
+      } catch (err) {
+        if (cancelled || controller.signal.aborted) {
+          return
+        }
+        setError(err as Error)
+        setKicadFiles(null)
+      }
+    }
+
+    loadFiles()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [serverUrl])
 
   const [searchTerm, setSearchTerm] = useState("")
   const [expandedDirs, setExpandedDirs] = useState<{ [key: string]: boolean }>(
     {},
   )
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
-  const { data: fileContent, error: fileError } = useQuery(
-    ["fileContent", selectedFile],
-    async () => {
-      const response = await fetch(`${serverUrl}/${selectedFile}`)
-      if (!response.ok) {
-        throw new Error("Network response was not ok")
-      }
-      return response.text()
-    },
-    {
-      enabled: Boolean(selectedFile),
-      cacheTime: 60_000 * 60,
-      staleTime: 60_000 * 60,
-      refetchOnWindowFocus: false,
-    },
-  )
+  useEffect(() => {
+    if (!selectedFile) {
+      setFileContent(null)
+      setFileError(null)
+      return
+    }
 
-  const { data: soup, error: soupError } = useQuery(
-    ["fileSoup", fileContent],
-    () => parseKicadModToTscircuitSoup(fileContent as string),
-    {
-      enabled: Boolean(fileContent),
-      cacheTime: 60_000 * 60,
-      staleTime: 60_000 * 60,
-      refetchOnWindowFocus: false,
-    },
-  )
+    if (fileContentCache.current.has(selectedFile)) {
+      setFileContent(fileContentCache.current.get(selectedFile) ?? null)
+      setFileError(null)
+      return
+    }
+
+    let cancelled = false
+    const controller = new AbortController()
+    setFileError(null)
+
+    const loadFileContent = async () => {
+      try {
+        const response = await fetch(`${serverUrl}/${selectedFile}`, {
+          signal: controller.signal,
+        })
+        if (!response.ok) {
+          throw new Error("Network response was not ok")
+        }
+        const text = await response.text()
+        if (!cancelled) {
+          fileContentCache.current.set(selectedFile, text)
+          setFileContent(text)
+        }
+      } catch (err) {
+        if (cancelled || controller.signal.aborted) {
+          return
+        }
+        setFileError(err as Error)
+        setFileContent(null)
+      }
+    }
+
+    loadFileContent()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [selectedFile, serverUrl])
+
+  useEffect(() => {
+    if (!selectedFile || !fileContent) {
+      setSoup(null)
+      setSoupError(null)
+      return
+    }
+
+    const cachedSoup = soupCache.current.get(selectedFile)
+    if (cachedSoup) {
+      setSoup(cachedSoup)
+      setSoupError(null)
+      return
+    }
+
+    try {
+      const parsedSoup = parseKicadModToTscircuitSoup(fileContent)
+      soupCache.current.set(selectedFile, parsedSoup)
+      setSoup(parsedSoup)
+      setSoupError(null)
+    } catch (err) {
+      setSoupError(err as Error)
+      setSoup(null)
+    }
+  }, [fileContent, selectedFile])
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(e.target.value)
@@ -105,7 +175,7 @@ function App() {
     }
   }, [kicadFiles])
 
-  const filteredData = kicadFiles?.filter((filePath: string) =>
+  const filteredData = (kicadFiles ?? []).filter((filePath: string) =>
     filePath.toLowerCase().includes(searchTerm.toLowerCase()),
   )
 
@@ -119,7 +189,7 @@ function App() {
     dirStructure[dir].push(file)
   })
 
-  if (error) return <div>Error: {(error as Error).message}</div>
+  if (error) return <div>Error: {error.message}</div>
   return (
     <div className="flex flex-col min-h-screen">
       <header className="p-4 text-sm flex border-b-gray-200 border-b items-center">
@@ -224,7 +294,7 @@ function App() {
                   </span>
                 </div>
                 {(expandedDirs[dir] ||
-                  (searchTerm && filteredData?.length < 100)) && (
+                  (searchTerm && filteredData.length < 100)) && (
                   <ul className="ml-4 cursor-pointer">
                     {dirStructure[dir].map((file) => (
                       <li
@@ -243,7 +313,7 @@ function App() {
           {/* XXX entries hidden */}
           {searchTerm && (
             <div className="text-xs text-gray-600 mt-4 text-center">
-              {kicadFiles?.length - filteredData?.length} entries filtered out
+              {(kicadFiles?.length ?? 0) - filteredData.length} entries filtered out
             </div>
           )}
         </aside>
@@ -305,14 +375,12 @@ function App() {
                 </div>
               )}
               {/* <pre className="bg-gray-100 p-4">{fileContent}</pre> */}
-              {(fileError as any) && (
-                <div className="text-red-600">
-                  Error: {(fileError as any).message}
-                </div>
+              {fileError && (
+                <div className="text-red-600">Error: {fileError.message}</div>
               )}
-              {(soupError as any) && (
+              {soupError && (
                 <div className="text-red-600">
-                  Error converting kicad_mod: {(soupError as any).message}
+                  Error converting kicad_mod: {soupError.message}
                 </div>
               )}
             </div>

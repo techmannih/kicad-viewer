@@ -4,27 +4,68 @@ import { parseKicadModToTscircuitSoup } from "kicad-mod-converter";
 
 const BASE_URL = "https://kicad-mod-cache.tscircuit.com";
 
+function isNetworkUnreachable(error) {
+        if (!error) return false;
+        const code = error.code ?? error?.cause?.code ?? error?.cause?.errors?.[0]?.code;
+        return code === "ENETUNREACH";
+}
+
+async function fetchWithTimeout(url, type) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30_000);
+        try {
+                const res = await fetch(url, { signal: controller.signal });
+                if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+                return type === "json" ? res.json() : res.text();
+        } catch (error) {
+                if (error.name === "AbortError") {
+                        throw new Error(`Timed out while fetching ${url}`);
+                }
+                throw error;
+        } finally {
+                clearTimeout(timeout);
+        }
+}
+
 async function fetchJson(url) {
-	const res = await fetch(url);
-	if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
-	return res.json();
+        return fetchWithTimeout(url, "json");
 }
 
 async function fetchText(url) {
-	const res = await fetch(url);
-	if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
-	return res.text();
+        return fetchWithTimeout(url, "text");
 }
 
 async function main() {
-	const files = await fetchJson(`${BASE_URL}/kicad_files.json`);
-	for (const file of files) {
-		if (!file.endsWith(".kicad_mod")) continue;
-		const content = await fetchText(`${BASE_URL}/${file}`).catch(err => null);
-		if (!content) continue
-		const soup = await parseKicadModToTscircuitSoup(content);
-		const outPath = join(
-			"public",
+        let files;
+        try {
+                files = await fetchJson(`${BASE_URL}/kicad_files.json`);
+        } catch (error) {
+                if (isNetworkUnreachable(error)) {
+                        console.warn(
+                                "[prebuild-footprints] Network unreachable while fetching KiCad footprints. Skipping prebuild step."
+                        );
+                        return;
+                }
+                throw error;
+        }
+        for (const file of files) {
+                if (!file.endsWith(".kicad_mod")) continue;
+                const content = await fetchText(`${BASE_URL}/${file}`).catch((error) => {
+                        if (isNetworkUnreachable(error)) {
+                                console.warn(
+                                        `[prebuild-footprints] Network unreachable while downloading ${file}. Skipping.`
+                                );
+                                return null;
+                        }
+                        console.warn(
+                                `[prebuild-footprints] Failed to download ${file}: ${error.message ?? error}`
+                        );
+                        return null;
+                });
+                if (!content) continue;
+                const soup = await parseKicadModToTscircuitSoup(content);
+                const outPath = join(
+                        "public",
 			"circuit-json",
 			file.replace(/\.kicad_mod$/, ".json"),
 		);

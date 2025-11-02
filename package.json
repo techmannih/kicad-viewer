@@ -7,7 +7,7 @@
     "dev": "vite",
     "prebuild-footprints": "node scripts/prebuild-footprints.js",
     "build": "npm run prebuild-footprints && tsc && vite build",
-    "vercel-build": "bun run build",
+    "vercel-build": "npm run build",
     "lint": "biome lint",
     "format": "biome format . --write",
     "preview": "vite preview",
@@ -36,5 +36,8 @@
     "tailwindcss": "^3.4.3",
     "typescript": "^5.2.2",
     "vite": "^5.2.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
